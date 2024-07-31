@@ -2118,7 +2118,6 @@ class PodmanCompose:
             "--label-domain",
             help="Specify an alternate root domain for resource labels (default: io.podman)",
             type=str,
-            metavar="label_domain",
             default="io.podman",
         )
         parser.add_argument(
