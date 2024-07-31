@@ -1415,7 +1415,7 @@ class Podman:
             cmd_ls = [self.podman_path, *podman_args, cmd] + xargs + cmd_args
             log.info(" ".join([str(i) for i in cmd_ls]))
             if self.dry_run:
-                return None
+                return 0
 
             if log_formatter is not None:
 
