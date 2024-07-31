@@ -1498,6 +1498,7 @@ def normalize_service(service, sub_dir=""):
                 context = "."
             service["build"]["context"] = context
     if "build" in service and "additional_contexts" in service["build"]:
+        build = service["build"]
         if isinstance(build["additional_contexts"], dict):
             new_additional_contexts = []
             for k, v in build["additional_contexts"].items():
