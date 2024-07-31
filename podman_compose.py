@@ -1617,6 +1617,7 @@ def rec_merge(target, *sources):
     """
     update target recursively from sources
     """
+    ret = target
     for source in sources:
         ret = rec_merge_one(target, source)
     return ret
