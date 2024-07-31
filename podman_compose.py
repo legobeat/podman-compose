@@ -23,6 +23,7 @@ import signal
 import subprocess
 import sys
 from asyncio import Task
+from typing import TypeGuard
 
 try:
     from shlex import quote as cmd_quote
@@ -42,15 +43,15 @@ script = os.path.realpath(sys.argv[0])
 # helper functions
 
 
-def is_str(string_object):
+def is_str(string_object) -> TypeGuard[str]:
     return isinstance(string_object, str)
 
 
-def is_dict(dict_object):
+def is_dict(dict_object) -> TypeGuard[dict]:
     return isinstance(dict_object, dict)
 
 
-def is_list(list_object):
+def is_list(list_object) -> TypeGuard[list]:
     return not is_str(list_object) and not is_dict(list_object) and hasattr(list_object, "__iter__")
 
 
