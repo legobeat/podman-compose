@@ -2792,6 +2792,8 @@ def compose_run_update_container_from_args(compose, cnt, args):
     if args.volume:
         # TODO: handle volumes
         volumes = clone(cnt.get("volumes", None) or [])
+        if not is_list(volumes):
+            raise ValueError("volumes need to be a list")
         volumes.extend(args.volume)
         cnt["volumes"] = volumes
     cnt["tty"] = not args.T
