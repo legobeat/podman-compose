@@ -434,7 +434,7 @@ async def assert_volume(compose, mount_dict):
         _ = (await compose.podman.output([], "volume", ["inspect", vol_name])).decode("utf-8")
 
 
-def mount_desc_to_mount_args(compose, mount_desc, srv_name, cnt_name):  # pylint: disable=unused-argument
+def mount_desc_to_mount_args(compose, mount_desc, srv_name='DEPRECATED', cnt_name='DEPRECATED'):  # pylint: disable=unused-argument
     mount_type = mount_desc.get("type", None)
     vol = mount_desc.get("_vol", None) if mount_type == "volume" else None
     source = vol["name"] if vol else mount_desc.get("source", None)
@@ -497,7 +497,7 @@ def container_to_ulimit_build_args(cnt, podman_args):
         ulimit_to_ulimit_args(build.get("ulimits", []), podman_args)
 
 
-def mount_desc_to_volume_args(compose, mount_desc, srv_name, cnt_name):  # pylint: disable=unused-argument
+def mount_desc_to_volume_args(compose, mount_desc, srv_name='DEPRECATED', cnt_name='DEPRECATED'):  # pylint: disable=unused-argument
     mount_type = mount_desc["type"]
     if mount_type not in ("bind", "volume"):
         raise ValueError("unknown mount type:" + mount_type)
@@ -567,9 +567,9 @@ async def get_mount_args(compose, cnt, volume):
             if opts:
                 args += ":" + ",".join(opts)
             return ["--tmpfs", args]
-        args = mount_desc_to_volume_args(compose, volume, srv_name, cnt["name"])
+        args = mount_desc_to_volume_args(compose, volume)
         return ["-v", args]
-    args = mount_desc_to_mount_args(compose, volume, srv_name, cnt["name"])
+    args = mount_desc_to_mount_args(compose, volume)
     return ["--mount", args]
 
 
