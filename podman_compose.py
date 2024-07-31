@@ -1323,8 +1323,10 @@ def flat_deps(services, with_extends=False):
         deps.update(deps_ls)
         # parse link to get service name and remove alias
         links_ls = srv.get("links", None) or []
-        if not is_list(links_ls):
+        if isinstance(links_ls, str):
             links_ls = [links_ls]
+        if not is_list(links_ls):
+            raise ValueError("Invalid type for links", links_ls)
         deps.update([(c.split(":")[0] if ":" in c else c) for c in links_ls])
         for c in links_ls:
             if ":" in c:
