@@ -48,7 +48,7 @@ class TestPodmanComposeInclude(unittest.TestCase, RunSubprocessMixin):
 
         self.run_subprocess_assert_returncode(command_up)
         out, _ = self.run_subprocess_assert_returncode(command_check_container)
-        expected_output = b'"localhost/nopush/podman-compose-test:latest"\n' * 2
+        expected_output = b'"localhost/nopush/podman-compose-test:latest"\n' * 4
         self.assertEqual(out, expected_output)
         # Get container ID to remove it
         out, _ = self.run_subprocess_assert_returncode(command_container_id)

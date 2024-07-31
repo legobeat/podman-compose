@@ -412,8 +412,8 @@ async def assert_volume(compose, mount_dict):
         if is_ext:
             raise RuntimeError(f"External volume [{vol_name}] does not exists") from e
         labels = vol.get("labels", None) or []
-        if not is_list(labels):
-            raise ValueError("labels must be list")
+        if not is_list(labels) and not isinstance(labels, dict):
+            raise ValueError("labels must be list or dict")
         args = [
             "create",
             "--label",
@@ -1051,7 +1051,7 @@ def get_net_args(compose, cnt):
 
 async def container_to_args(compose, cnt, detached=True):
     # TODO: double check -e , --add-host, -v, --read-only
-    dirname = compose.dirname
+    # dirname = compose.dirname
     pod = cnt.get("pod", None) or ""
     name = cnt["name"]
     podman_args = [f"--name={name}"]
@@ -1098,17 +1098,18 @@ async def container_to_args(compose, cnt, detached=True):
         env_file = [env_file]
     for i in env_file:
         if isinstance(i, str):
-            i = {"path": i}
+            i = {"path": i, "required": True}
         elif not isinstance(i, dict):
             raise ValueError("invalid env_file")
         path = i["path"]
         required = i.get("required", True)
-        i = os.path.realpath(os.path.join(dirname, path))
+        # i = os.path.realpath(os.path.join(dirname, path))
+        i = os.path.realpath(os.path.join(path))
         if not os.path.exists(i):
             if not required:
                 continue
             raise ValueError("Env file at {} does not exist".format(i))
-        dotenv_dict = {}
+        dotenv_dict: dict
         dotenv_dict = dotenv_to_dict(i)
         env = norm_as_list(dotenv_dict)
         for e in env:
@@ -1807,29 +1808,37 @@ class PodmanCompose:
             else:
                 default_ls = COMPOSE_DEFAULT_LS
             args.file = list(filter(os.path.exists, default_ls))
-        files = args.file
+        files = [
+            {
+                'path': filename,
+                'project_directory': os.path.realpath(os.path.dirname(filename)),
+                #'env_file': [args.env_file] if isinstance(args.env_file, str) else args.env_file if
+                # args.env_file else [],
+                'env_file': [],
+            }
+            for filename in args.file
+        ]
         if not files:
             log.fatal(
                 "no compose.yaml, docker-compose.yml or container-compose.yml file found, "
                 "pass files with -f"
             )
             sys.exit(-1)
-        ex = map(lambda x: x == '-' or os.path.exists(x), files)
+        ex = map(lambda x: x == '-' or os.path.exists(x), [f['path'] for f in files])
         missing = [fn0 for ex0, fn0 in zip(ex, files) if not ex0]
         if missing:
             log.fatal("missing files: %s", missing)
             sys.exit(1)
         # make absolute
         relative_files = files
-        filename = files[0]
+        file = files[0]
         project_name = args.project_name
         # no_ansi = args.no_ansi
         # no_cleanup = args.no_cleanup
         # dry_run = args.dry_run
         # host_env = None
-        dirname = os.path.realpath(os.path.dirname(filename))
-        dir_basename = os.path.basename(dirname)
-        self.dirname = dirname
+        dir_basename = os.path.basename(file['project_directory'])
+        self.dirname = file['project_directory']
 
         # env-file is relative to the CWD
         dotenv_dict = {}
@@ -1837,14 +1846,14 @@ class PodmanCompose:
             # Load .env from the Compose file's directory to preserve
             # behavior prior to 1.1.0 and to match with Docker Compose (v2).
             if ".env" == args.env_file:
-                project_dotenv_file = os.path.realpath(os.path.join(dirname, ".env"))
+                project_dotenv_file = os.path.realpath(os.path.join(self.dirname, ".env"))
                 if os.path.exists(project_dotenv_file):
                     dotenv_dict.update(dotenv_to_dict(project_dotenv_file))
             dotenv_path = os.path.realpath(args.env_file)
             dotenv_dict.update(dotenv_to_dict(dotenv_path))
 
         # TODO: remove next line
-        os.chdir(dirname)
+        os.chdir(self.dirname)
 
         os.environ.update({
             key: value for key, value in dotenv_dict.items() if key.startswith("PODMAN_")
@@ -1854,12 +1863,12 @@ class PodmanCompose:
         # see: https://docs.docker.com/compose/reference/envvars/
         # see: https://docs.docker.com/compose/env-file/
         self.environ.update({
-            "COMPOSE_PROJECT_DIR": dirname,
-            "COMPOSE_FILE": pathsep.join(relative_files),
+            "COMPOSE_PROJECT_DIR": self.dirname,
+            "COMPOSE_FILE": pathsep.join([f['path'] for f in relative_files]),
             "COMPOSE_PATH_SEPARATOR": pathsep,
         })
 
-        if args and 'env' in args and args.env:
+        if 'env' in args and args.env:
             env_vars = norm_as_dict(args.env)
             self.environ.update(env_vars)
 
@@ -1869,45 +1878,92 @@ class PodmanCompose:
 
         while True:
             try:
-                filename = next(files_iter)
+                file = next(files_iter)
             except StopIteration:
                 break
 
-            if filename.strip().split('/')[-1] == '-':
+            if file['path'].strip().split('/')[-1] == '-':
                 content = yaml.safe_load(sys.stdin)
             else:
-                with open(filename, "r", encoding="utf-8") as f:
+                with open(file['path'], "r", encoding="utf-8") as f:
                     content = yaml.safe_load(f)
                 # log(filename, json.dumps(content, indent = 2))
             if not isinstance(content, dict):
                 sys.stderr.write(
-                    "Compose file does not contain a top level object: %s\n" % filename
+                    "Compose file does not contain a top level object: %s\n" % file['path']
                 )
                 sys.exit(1)
             content = normalize(content)
+
+            def translate_paths_service(content: dict, project_directory: str):
+                if 'env_file' in content:
+                    env_file = (
+                        [content['env_file']]
+                        if isinstance(content['env_file'], str)
+                        else content['env_file']
+                    )
+                    content['env_file'] = [
+                            os.path.join(project_directory or '.', ef if isinstance(ef, str) else
+                                         ef['path']) for ef in env_file
+                    ]
+                return content
+
+            def translate_paths(content, project_directory):
+                if 'services' in content:
+                    services = {
+                        key: translate_paths_service(val, project_directory)
+                        for key, val in content['services'].items()
+                    }
+                    content['services'] = services
+                return content
+
+            content = translate_paths(content, file['project_directory'])
             # log(filename, json.dumps(content, indent = 2))
+            # TODO: this seems to miss environment files from other includes
             content = rec_subs(content, self.environ)
             rec_merge(compose, content)
             # If `include` is used, append included files to files
             spec_include = compose.get("include", None)
             #####
-            def flatten(S):
-                # https://stackoverflow.com/questions/12472338/flattening-a-list-recursively
-                if S == []:
-                    return S
-                if isinstance(S[0], list):
-                    return flatten(S[0]) + flatten(S[1:])
-                return S[:1] + flatten(S[1:])
-            def extend_include(compose: Compose, include) -> set[str]:
+            # def flatten(S):
+            #    # https://stackoverflow.com/questions/12472338/flattening-a-list-recursively
+            #    if len(S) == 0:
+            #        return S
+            #    if isinstance(S[0], list):
+            #        return flatten(S[0]) + flatten(S[1:])
+            #    print(len(S), S)
+            #    return S[:1] + flatten(S[1:])
+
+            def extend_include(project_directory: str, include_spec: list) -> list[dict[str, dict]]:
                 # https://github.com/compose-spec/compose-spec/blob/main/14-include.md
-                if not is_list(include):
+                if not is_list(include_spec):
                     raise ValueError("include must be list")
-                return set(flatten([
-                    f if isinstance(f, str) else f.path for f in files
-                ]))
+                # mount_src = os.path.realpath(os.path.join(basedir, os.path.expanduser(mount_src)))
+                include = [
+                    {
+                        'path': os.path.join(project_directory, f),
+                        'project_directory': None,
+                        'env_file': [],
+                    }
+                    if isinstance(f, str)
+                    else {
+                        'path': os.path.join(project_directory, f['path']),
+                        'project_directory': os.path.join(project_directory, f['project_directory'])
+                        if f.get('project_directory', None)
+                        else None,
+                        'env_file': [os.path.join(project_directory, f['env_file'])]
+                        if isinstance(f.get('env_file', None), str)
+                        else os.path.join(project_directory, f.get('env_file'))
+                        if f.get('env_file', None)
+                        else None,
+                    }
+                    for f in include_spec
+                ]
+                return include
+
             #####
             if spec_include:
-                include_files = extend_include(compose, spec_include)
+                include_files = extend_include(file['project_directory'] or '.', spec_include)
 
                 files.extend(include_files)
                 # As compose obj is updated and tested with every loop, not deleting `include`
@@ -1994,8 +2050,9 @@ class PodmanCompose:
             "io.podman.compose.version=" + __version__,
             f"PODMAN_SYSTEMD_UNIT=podman-compose@{project_name}.service",
             "com.docker.compose.project=" + project_name,
-            "com.docker.compose.project.working_dir=" + dirname,
-            "com.docker.compose.project.config_files=" + ",".join(relative_files),
+            "com.docker.compose.project.working_dir=" + self.dirname,
+            "com.docker.compose.project.config_files="
+            + ",".join([file['path'] for file in relative_files]),
         ]
         # other top-levels:
         # networks: {driver: ...}
