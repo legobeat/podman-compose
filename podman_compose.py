@@ -25,6 +25,7 @@ import signal
 import subprocess
 import sys
 from asyncio import Task
+from typing import TypeGuard
 
 try:
     from shlex import quote as cmd_quote
@@ -44,7 +45,7 @@ script = os.path.realpath(sys.argv[0])
 # helper functions
 
 
-def is_list(list_object):
+def is_list(list_object) -> TypeGuard[list]:
     return (
         not isinstance(list_object, str)
         and not isinstance(list_object, dict)
