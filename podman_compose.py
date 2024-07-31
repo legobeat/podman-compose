@@ -7,6 +7,8 @@
 # https://docs.docker.com/compose/django/
 # https://docs.docker.com/compose/wordpress/
 # TODO: podman pod logs --color -n -f pod_testlogs
+from __future__ import annotations
+
 import argparse
 import asyncio.subprocess
 import getpass
@@ -297,6 +299,7 @@ def norm_as_list(src):
     given a dictionary {key1:value1, key2: None} or list
     return a list of ["key1=value1", "key2"]
     """
+    dst: list[str]
     if src is None:
         dst = []
     elif isinstance(src, dict):
@@ -1670,7 +1673,7 @@ COMPOSE_DEFAULT_LS = [
 
 class PodmanCompose:
     def __init__(self):
-        self.podman = None
+        self.podman: Podman
         self.podman_version = None
         self.environ = {}
         self.exit_code = None
@@ -1958,7 +1961,9 @@ class PodmanCompose:
         container_names_by_service = {}
         self.services = services
         for service_name, service_desc in services.items():
-            replicas = try_int(service_desc.get("deploy", {}).get("replicas", "1"))
+            spec_replicas = try_int(service_desc.get("deploy", {}).get("replicas", "1"))
+            replicas = spec_replicas if spec_replicas is not None else 1
+
             container_names_by_service[service_name] = []
             for num in range(1, replicas + 1):
                 name0 = f"{project_name}_{service_name}_{num}"
