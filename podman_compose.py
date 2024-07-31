@@ -1456,7 +1456,7 @@ class Podman:
                     "ls",
                     "--noheading",
                     "--filter",
-                    f"label={self.compose.label_domain}.compose.project={project_name}",
+                    f"label={self.compose.label_domain}.compose.project={proj_name}",
                     "--format",
                     "{{.Name}}",
                 ],
