@@ -1387,7 +1387,8 @@ class Podman:
             if p.returncode == 0:
                 return stdout_data
 
-            raise subprocess.CalledProcessError(p.returncode, " ".join(cmd_ls), stderr_data)
+            returncode = p.returncode if p.returncode is not None else -1
+            raise subprocess.CalledProcessError(returncode, " ".join(cmd_ls), stderr_data)
 
     def exec(
         self,
