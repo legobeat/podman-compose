@@ -1889,9 +1889,27 @@ class PodmanCompose:
             content = rec_subs(content, self.environ)
             rec_merge(compose, content)
             # If `include` is used, append included files to files
-            include = compose.get("include", None)
-            if include:
-                files.extend(include)
+            spec_include = compose.get("include", None)
+            #####
+            def flatten(S):
+                # https://stackoverflow.com/questions/12472338/flattening-a-list-recursively
+                if S == []:
+                    return S
+                if isinstance(S[0], list):
+                    return flatten(S[0]) + flatten(S[1:])
+                return S[:1] + flatten(S[1:])
+            def extend_include(compose: Compose, include) -> set[str]:
+                # https://github.com/compose-spec/compose-spec/blob/main/14-include.md
+                if not is_list(include):
+                    raise ValueError("include must be list")
+                return set(flatten([
+                    f if isinstance(f, str) else f.path for f in files
+                ]))
+            #####
+            if spec_include:
+                include_files = extend_include(compose, spec_include)
+
+                files.extend(include_files)
                 # As compose obj is updated and tested with every loop, not deleting `include`
                 # from it, results in it being tested again and again, original values for
                 # `include` be appended to `files`, and, included files be processed for ever.
