@@ -304,10 +304,12 @@ def norm_as_list(src):
         dst = []
     elif isinstance(src, dict):
         dst = [(f"{k}={v}" if v is not None else k) for k, v in src.items()]
+    elif isinstance(src, str):
+        dst = [src]
     elif is_list(src):
         dst = list(src)
     else:
-        dst = [src]
+        raise ValueError("Unexpected type in norm_as_list")
     return dst
 
 
@@ -409,6 +411,8 @@ async def assert_volume(compose, mount_dict):
         if is_ext:
             raise RuntimeError(f"External volume [{vol_name}] does not exists") from e
         labels = vol.get("labels", None) or []
+        if not is_list(labels):
+            raise ValueError("labels must be list")
         args = [
             "create",
             "--label",
@@ -1094,6 +1098,8 @@ async def container_to_args(compose, cnt, detached=True):
     for i in env_file:
         if isinstance(i, str):
             i = {"path": i}
+        elif not isinstance(i, dict):
+            raise ValueError("invalid env_file")
         path = i["path"]
         required = i.get("required", True)
         i = os.path.realpath(os.path.join(dirname, path))
@@ -1326,7 +1332,7 @@ def flat_deps(services, with_extends=False):
         if isinstance(links_ls, str):
             links_ls = [links_ls]
         if not is_list(links_ls):
-            raise ValueError("Invalid type for links", links_ls)
+            raise ValueError("links must be list or string")
         deps.update([(c.split(":")[0] if ":" in c else c) for c in links_ls])
         for c in links_ls:
             if ":" in c:
@@ -1384,10 +1390,13 @@ class Podman:
             )
 
             stdout_data, stderr_data = await p.communicate()
-            if p.returncode == 0:
-                return stdout_data
 
-            returncode = p.returncode if p.returncode is not None else -1
+            returncode = p.returncode
+            if returncode == 0:
+                return stdout_data
+            if returncode == None:
+                returncode = -1
+
             raise subprocess.CalledProcessError(returncode, " ".join(cmd_ls), stderr_data)
 
     def exec(
@@ -1719,6 +1728,8 @@ class PodmanCompose:
     def assert_services(self, services):
         if isinstance(services, str):
             services = [services]
+        if not is_list(services):
+            raise ValueError("services must be list or string")
         given = set(services or [])
         missing = given - self.all_services
         if missing:
@@ -1728,8 +1739,9 @@ class PodmanCompose:
 
     def get_podman_args(self, cmd):
         xargs = []
-        for args in self.global_args.podman_args:
-            xargs.extend(shlex.split(args))
+        if self.global_args:
+            for args in self.global_args.podman_args:
+                xargs.extend(shlex.split(args))
         cmd_norm = cmd if cmd != "create" else "run"
         cmd_args = self.global_args.__dict__.get(f"podman_{cmd_norm}_args", None) or []
         for args in cmd_args:
@@ -2794,7 +2806,7 @@ def compose_run_update_container_from_args(compose, cnt, args):
         # TODO: handle volumes
         volumes = clone(cnt.get("volumes", None) or [])
         if not is_list(volumes):
-            raise ValueError("volumes need to be a list")
+            raise ValueError('only list definitions for volumes supported')
         volumes.extend(args.volume)
         cnt["volumes"] = volumes
     cnt["tty"] = not args.T
