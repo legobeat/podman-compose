@@ -866,7 +866,9 @@ async def assert_cnt_nets(compose, cnt):
         except subprocess.CalledProcessError as e:
             if is_ext:
                 raise RuntimeError(f"External network [{net_name}] does not exists") from e
-            args = get_network_create_args(net_desc, compose.project_name, net_name, compose.label_domain)
+            args = get_network_create_args(
+                net_desc, compose.project_name, net_name, compose.label_domain
+            )
             await compose.podman.output([], "network", args)
             await compose.podman.output([], "network", ["exists", net_name])
 
@@ -1790,7 +1792,10 @@ class PodmanCompose:
         relative_files = files
         filename = files[0]
         project_name = args.project_name
-        label_domain = args.label_domain
+        if args.label_domain:
+            label_domain = args.label_domain
+        else:
+            label_domain = os.eviron.get("COMPOSE_LABEL_DOMAIN", "io.podman")
         # no_ansi = args.no_ansi
         # no_cleanup = args.no_cleanup
         # dry_run = args.dry_run
@@ -2117,6 +2122,7 @@ class PodmanCompose:
         parser.add_argument(
             "--label-domain",
             help="Specify an alternate root domain for resource labels (default: io.podman)",
+            metavar="label_domain",
             type=str,
             default="io.podman",
         )
@@ -2685,7 +2691,11 @@ async def compose_down(compose, args):
 
 @cmd_run(podman_compose, "ps", "show status of containers")
 async def compose_ps(compose, args):
-    ps_args = ["-a", "--filter", f"label={compose.label_domain}.compose.project={compose.project_name}"]
+    ps_args = [
+        "-a",
+        "--filter",
+        f"label={compose.label_domain}.compose.project={compose.project_name}",
+    ]
     if args.quiet is True:
         ps_args.extend(["--format", "{{.ID}}"])
     elif args.format:
