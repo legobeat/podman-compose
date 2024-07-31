@@ -1644,6 +1644,8 @@ def resolve_extends(services, service_names, environ):
                 content = content["services"]
             subdirectory = os.path.dirname(filename)
             content = rec_subs(content, environ)
+            if not isinstance(content, dict):
+                raise ValueError("services must be a dict")
             from_service = content.get(from_service_name, {}) or {}
             normalize_service(from_service, subdirectory)
         else:
