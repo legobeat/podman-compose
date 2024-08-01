@@ -228,7 +228,7 @@ def strverscmp_lt(a, b):
 def parse_short_mount(compose, mount_str):
     # TODO: handle relative path according to spec. Will require some refactoring
     basedir = compose.dirname
-    mount_str = envsubst(mount_str, compose.environ)
+    mount_str = rec_subs(mount_str, compose.environ)
     mount_a = mount_str.split(":")
     mount_opt_dict = {}
     mount_opt = None
@@ -626,6 +626,8 @@ def get_mnt_dict(compose, cnt, volume):
     srv_name = cnt["_service"]
     if isinstance(volume, str):
         volume = parse_short_mount(compose, volume)
+    else:
+        volume["source"] = rec_subs(volume["source"], compose.environ)
     return fix_mount_dict(compose, volume, proj_name, srv_name)
 
 
@@ -2207,8 +2209,9 @@ class PodmanCompose:
                         and mnt_dict["source"]
                         and mnt_dict["source"] not in self.vols
                     ):
-                        vol_name = rec_subs(mnt_dict["source"], self.environ)
-                        raise RuntimeError(f"volume [{vol_name}] not defined in top level")
+                        raise RuntimeError(
+                            f"volume [{mnt_dict["source"]}] not defined in top level"
+                        )
         self.container_names_by_service = container_names_by_service
         self.all_services = set(container_names_by_service.keys())
         container_by_name = {c["name"]: c for c in given_containers}
