@@ -68,7 +68,7 @@ For more info:
 # SOFTWARE.
 
 _simple_re = re.compile(r'(?<!\\)\$([A-Za-z0-9_]+)')
-_extended_re = re.compile(r'(?<!\\)\$\{([A-Za-z0-9_]+)((:?-)([^}]+))?\}')
+_extended_re = re.compile(r'(?<!\\)\$\{([A-Za-z0-9_]+)((:?-)(.+))?\}')
 
 
 def _repl_simple_env_var(env):
