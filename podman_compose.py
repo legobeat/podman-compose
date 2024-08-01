@@ -131,7 +131,10 @@ def strverscmp_lt(a, b):
     return a_ls < b_ls
 
 
-def parse_short_mount(mount_str, basedir):
+def parse_short_mount(compose, mount_str):
+    # TODO: handle relative path according to spec. Will require some refactoring
+    basedir = compose.dirname
+    mount_str = rec_subs(mount_str, compose.environ)
     mount_a = mount_str.split(":")
     mount_opt_dict = {}
     mount_opt = None
@@ -199,6 +202,7 @@ def fix_mount_dict(compose, mount_dict, proj_name, srv_name):
     - define _vol to be the corresponding top-level volume
     - if name is missing it would be source prefixed with project
     - if no source it would be generated
+    - substitute variables
     """
     # if already applied nothing todo
     if "_vol" in mount_dict:
@@ -413,7 +417,7 @@ async def assert_volume(compose, mount_dict):
             raise RuntimeError(f"External volume [{vol_name}] does not exists") from e
         labels = vol.get("labels", None) or []
         if not is_list(labels) and not isinstance(labels, dict):
-            raise ValueError("labels must be list or dict")
+            raise ValueError("labels not list or dict on volume [{vol_name}]") from e
         args = [
             "create",
             "--label",
@@ -540,16 +544,14 @@ def mount_desc_to_volume_args(compose, mount_desc, srv_name='DEPRECATED', cnt_na
 def get_mnt_dict(compose, cnt, volume):
     proj_name = compose.project_name
     srv_name = cnt["_service"]
-    basedir = compose.dirname
     if isinstance(volume, str):
-        volume = parse_short_mount(volume, basedir)
+        volume = parse_short_mount(compose, volume)
     return fix_mount_dict(compose, volume, proj_name, srv_name)
 
 
 async def get_mount_args(compose, cnt, volume):
     volume = get_mnt_dict(compose, cnt, volume)
     # proj_name = compose.project_name
-    srv_name = cnt["_service"]
     mount_type = volume["type"]
     await assert_volume(compose, volume)
     if compose.prefer_volume_over_mount:
@@ -1396,7 +1398,7 @@ class Podman:
             returncode = p.returncode
             if returncode == 0:
                 return stdout_data
-            if returncode == None:
+            if returncode is None:
                 returncode = -1
 
             raise subprocess.CalledProcessError(returncode, " ".join(cmd_ls), stderr_data)
@@ -1903,8 +1905,14 @@ class PodmanCompose:
                         else content['env_file']
                     )
                     content['env_file'] = [
-                            os.path.join(project_directory or '.', ef if isinstance(ef, str) else
-                                         ef['path']) for ef in env_file
+                        {
+                            'path': os.path.join(
+                                project_directory or os.path.dirname(file['path']),
+                                ef if isinstance(ef, str) else ef['path'],
+                            ),
+                            'required': ef.get('required', True) if isinstance(ef, dict) else True,
+                        }
+                        for ef in env_file
                     ]
                 return content
 
@@ -1917,9 +1925,10 @@ class PodmanCompose:
                     content['services'] = services
                 return content
 
-            content = translate_paths(content, file['project_directory'])
+            content = translate_paths(
+                content, file['project_directory'] or os.path.dirname(file['path'])
+            )
             # log(filename, json.dumps(content, indent = 2))
-            # TODO: this seems to miss environment files from other includes
             content = rec_subs(content, self.environ)
             rec_merge(compose, content)
             # If `include` is used, append included files to files
@@ -2706,12 +2715,11 @@ async def compose_up(compose: PodmanCompose, args):
 
 def get_volume_names(compose, cnt):
     proj_name = compose.project_name
-    basedir = compose.dirname
     srv_name = cnt["_service"]
     ls = []
     for volume in cnt.get("volumes", []):
         if isinstance(volume, str):
-            volume = parse_short_mount(volume, basedir)
+            volume = parse_short_mount(compose, volume)
         volume = fix_mount_dict(compose, volume, proj_name, srv_name)
         mount_type = volume["type"]
         if mount_type != "volume":
