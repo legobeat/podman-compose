@@ -22,7 +22,7 @@ class TestRecSubs(unittest.TestCase):
             {"environment": {"v100": "v1.0.0", "image": "abc:v1.0.0"}},
         ),
         (
-            "Non-variable should not be substituted",
+            "Escaped vars should not be substituted",
             {"environment": {"non_var": "$$v1", "vx": "$non_var"}, "image": "abc:$non_var"},
             {"environment": {"non_var": "$v1", "vx": "$v1"}, "image": "abc:$v1"},
         ),

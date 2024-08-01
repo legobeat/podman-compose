@@ -338,46 +338,48 @@ def fix_mount_dict(compose, mount_dict, proj_name, srv_name):
 # ${VARIABLE?err} raise error if not set
 # $$ means $
 
-var_re = re.compile(
-    r"""
-    \$(?:
-        (?P<escaped>\$) |
-        (?P<named>[_a-zA-Z][_a-zA-Z0-9]*) |
-        (?:{
-            (?P<braced>[_a-zA-Z][_a-zA-Z0-9]*)
-            (?:(?P<empty>:)?(?:
-                (?:-(?P<default>[^}]*)) |
-                (?:\?(?P<err>[^}]*))
-            ))?
-        })
-    )
-""",
-    re.VERBOSE,
-)
+var_re = re.compile(r'^\$|.*[^\\]\$')
 
-
-def rec_subs(value, subs_dict):
-    """
-    do bash-like substitution in value and if list of dictionary do that recursively
-    """
+def _rec_subs_post(value):
+    if isinstance(value, str):
+        return value.replace(r'\$', '$')
     if isinstance(value, dict):
-        if 'environment' in value and isinstance(value['environment'], dict):
-            # Load service's environment variables
-            subs_dict = subs_dict.copy()
-            svc_envs = {k: v for k, v in value['environment'].items() if k not in subs_dict}
-            # we need to add `svc_envs` to the `subs_dict` so that it can evaluate the
-            # service environment that reference to another service environment.
-            subs_dict.update(svc_envs)
-            svc_envs = rec_subs(svc_envs, subs_dict)
-            subs_dict.update(svc_envs)
-
-        value = {k: rec_subs(v, subs_dict) for k, v in value.items()}
-    elif isinstance(value, str):
-        while value and var_re.match(value):
-            value = envsubst(value, subs_dict)
-    elif hasattr(value, "__iter__"):
-        value = [rec_subs(i, subs_dict) for i in value]
+        return {k: _rec_subs_post(v) for k, v in value.items()}
+    if is_list(value):
+        return [_rec_subs_post(i) for i in value]
     return value
+
+def _rec_subs(value, subs_dict):
+    result = value
+    """
+    do bash-like substitution in result and if list of dictionary do that recursively
+    """
+    if isinstance(result, dict):
+        result = {k: _rec_subs(v, subs_dict) for k, v in result.items()}
+    elif isinstance(result, str):
+        #print(' SFINAL', value, result, subs_dict, var_re.match(result))
+        while result and not var_re.match(result) is None:
+            #print('  lessgo', value, result)
+            result = envsubst(result.replace('$$', r'\$'), subs_dict)
+    elif hasattr(result, "__iter__"):
+        result = [_rec_subs(i, subs_dict) for i in result]
+    #print('    FINAL', value, result, subs_dict)
+    return result
+
+def rec_subs(value, subs_dict: dict):
+    if 'environment' in value and isinstance(value['environment'], dict):
+        # Load service's environment variables
+        new_subs_dict = subs_dict.copy()
+        svc_envs = {k: _rec_subs(v, subs_dict) for k, v in value['environment'].items() if k not in subs_dict}
+        #print('envs', svc_envs)
+        # we need to add `svc_envs` to the `subs_dict` so that it can evaluate the
+        # service environment that reference to another service environment.
+        new_subs_dict.update(svc_envs)
+        subs_dict = new_subs_dict
+        #print('subs_dict',  subs_dict)
+
+    result = _rec_subs(value, subs_dict)
+    return _rec_subs_post(result)
 
 
 def norm_as_list(src):
