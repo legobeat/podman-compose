@@ -75,6 +75,7 @@ def _repl_simple_env_var(env):
     def f(m):
         var_name = m.group(1)
         return env.get(var_name, '')
+
     return f
 
 
@@ -99,6 +100,7 @@ def _repl_extended_env_var(env):
                 raise RuntimeError('unexpected string matched regex')
         else:
             return env.get(var_name, '')
+
     return g
 
 
@@ -128,6 +130,7 @@ def envsubst(string, env):
     # handle bracketed env vars with optional default specification
     b = _extended_re.sub(_repl_extended_env_var(env), a)
     return b
+
 
 ############# END ENVSUBST
 
@@ -953,7 +956,9 @@ async def assert_cnt_nets(compose, cnt):
         net_desc = nets[net] or {}
         is_ext = net_desc.get("external", None)
         ext_desc = is_ext if isinstance(is_ext, dict) else {}
-        default_net_name = default_network_name_for_project(compose, compose.project_name, net, is_ext)
+        default_net_name = default_network_name_for_project(
+            compose, compose.project_name, net, is_ext
+        )
         net_name = ext_desc.get("name", None) or net_desc.get("name", None) or default_net_name
         try:
             await compose.podman.output([], "network", ["exists", net_name])
@@ -2113,7 +2118,7 @@ class PodmanCompose:
         nets = compose.get("networks", None) or {}
         if not nets:
             nets = {
-              "default": None,
+                "default": None,
             }
         if not isinstance(nets, dict):
             raise ValueError("invalid nets")
