@@ -1,5 +1,8 @@
-version: '3.6'
-
 include:
   - docker-compose.base.yaml
-  - docker-compose.extend.yaml
+  - path: docker-compose.extend.yaml
+  - path: subdir/base-proj.docker-compose.yaml
+    project_directory: .
+  - path: subdir/subdir-proj.docker-compose.yaml
+    project_directory: subdir
+  - path: subdir/default-proj.docker-compose.yaml

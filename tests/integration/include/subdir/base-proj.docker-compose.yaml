@@ -1,0 +1,10 @@
+services:
+  baseapp:
+    image: nopush/podman-compose-test
+    command: ["/bin/busybox", "sh", "-c", "env | grep ZZ"]
+    tmpfs:
+      - /run
+      - /tmp
+    env_file:
+      - env-files/base.env
+

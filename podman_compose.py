@@ -7,6 +7,8 @@
 # https://docs.docker.com/compose/django/
 # https://docs.docker.com/compose/wordpress/
 # TODO: podman pod logs --color -n -f pod_testlogs
+from __future__ import annotations
+
 import argparse
 import asyncio.subprocess
 import getpass
@@ -23,35 +25,146 @@ import signal
 import subprocess
 import sys
 from asyncio import Task
+from typing import TypeGuard
 
 try:
     from shlex import quote as cmd_quote
 except ImportError:
     from pipes import quote as cmd_quote  # pylint: disable=deprecated-module
 
-# import fnmatch
-# fnmatch.fnmatchcase(env, "*_HOST")
-
 import yaml
 from dotenv import dotenv_values
 
 __version__ = "1.2.0"
+
+############# BEGIN ENVSUSBST
+"""
+Substitute environment variables in a string.
+
+For more info:
+>>> from envsubst import envsubst
+>>> help(envsubst)
+"""
+# MIT License
+#
+# Copyright (c) 2019 Alex Shafer
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+_simple_re = re.compile(r'(?<!\\)\$([A-Za-z0-9_]+)')
+_extended_re = re.compile(r'(?<!\\)\$\{([A-Za-z0-9_]+)((:?-)([^}]+))?\}')
+
+
+def _repl_simple_env_var(env):
+    def f(m):
+        var_name = m.group(1)
+        return env.get(var_name, '')
+    return f
+
+
+def _repl_extended_env_var(env):
+    def g(m):
+        var_name = m.group(1)
+        default_spec = m.group(2)
+        if default_spec:
+            default = m.group(4)
+            default = _simple_re.sub(_repl_simple_env_var, default)
+            if m.group(3) == ':-':
+                # use default if var is unset or empty
+                env_var = env.get(var_name, None)
+                if env_var:
+                    return env_var
+                else:
+                    return default
+            elif m.group(3) == '-':
+                # use default if var is unset
+                return env.get(var_name, default)
+            else:
+                raise RuntimeError('unexpected string matched regex')
+        else:
+            return env.get(var_name, '')
+    return g
+
+
+def envsubst(string, env):
+    """
+    Substitute environment variables in the given string
+
+    The following forms are supported:
+
+    Simple variables - will use an empty string if the variable is unset
+      $FOO
+
+    Bracketed expressions
+      ${FOO}
+        identical to $FOO
+      ${FOO:-somestring}
+        uses "somestring" if $FOO is unset, or set and empty
+      ${FOO-somestring}
+        uses "somestring" only if $FOO is unset
+
+    :param str string: A string possibly containing environment variables
+    :return: The string with environment variable specs replaced with their values
+    """
+    # handle simple un-bracketed env vars like $FOO
+    a = _simple_re.sub(_repl_simple_env_var(env), string)
+
+    # handle bracketed env vars with optional default specification
+    b = _extended_re.sub(_repl_extended_env_var(env), a)
+    return b
+
+
+def main():
+    opened = False
+    f = sys.stdin
+    try:
+        try:
+            fn = sys.argv[1]
+            if fn != '-':
+                f = open(fn)
+                opened = True
+        except IndexError:
+            pass
+
+        data = f.read()
+        try:
+            data = data.decode('utf-8')
+        except AttributeError:
+            pass
+
+        sys.stdout.write(envsubst(data))
+    finally:
+        if opened:
+            f.close()
+############# END ENVSUBST
 
 script = os.path.realpath(sys.argv[0])
 
 # helper functions
 
 
-def is_str(string_object):
-    return isinstance(string_object, str)
-
-
-def is_dict(dict_object):
-    return isinstance(dict_object, dict)
-
-
-def is_list(list_object):
-    return not is_str(list_object) and not is_dict(list_object) and hasattr(list_object, "__iter__")
+def is_list(list_object) -> TypeGuard[list]:
+    return (
+        not isinstance(list_object, str)
+        and not isinstance(list_object, dict)
+        and hasattr(list_object, "__iter__")
+    )
 
 
 # identity filter
@@ -132,7 +245,10 @@ def strverscmp_lt(a, b):
     return a_ls < b_ls
 
 
-def parse_short_mount(mount_str, basedir):
+def parse_short_mount(compose, mount_str):
+    # TODO: handle relative path according to spec. Will require some refactoring
+    basedir = compose.dirname
+    mount_str = envsubst(mount_str, compose.environ)
     mount_a = mount_str.split(":")
     mount_opt_dict = {}
     mount_opt = None
@@ -200,6 +316,7 @@ def fix_mount_dict(compose, mount_dict, proj_name, srv_name):
     - define _vol to be the corresponding top-level volume
     - if name is missing it would be source prefixed with project
     - if no source it would be generated
+    - substitute variables
     """
     # if already applied nothing todo
     if "_vol" in mount_dict:
@@ -263,8 +380,8 @@ def rec_subs(value, subs_dict):
     """
     do bash-like substitution in value and if list of dictionary do that recursively
     """
-    if is_dict(value):
-        if 'environment' in value and is_dict(value['environment']):
+    if isinstance(value, dict):
+        if 'environment' in value and isinstance(value['environment'], dict):
             # Load service's environment variables
             subs_dict = subs_dict.copy()
             svc_envs = {k: v for k, v in value['environment'].items() if k not in subs_dict}
@@ -275,7 +392,7 @@ def rec_subs(value, subs_dict):
             subs_dict.update(svc_envs)
 
         value = {k: rec_subs(v, subs_dict) for k, v in value.items()}
-    elif is_str(value):
+    elif isinstance(value, str):
 
         def convert(m):
             if m.group("escaped") is not None:
@@ -301,14 +418,17 @@ def norm_as_list(src):
     given a dictionary {key1:value1, key2: None} or list
     return a list of ["key1=value1", "key2"]
     """
+    dst: list[str]
     if src is None:
         dst = []
-    elif is_dict(src):
+    elif isinstance(src, dict):
         dst = [(f"{k}={v}" if v is not None else k) for k, v in src.items()]
+    elif isinstance(src, str):
+        dst = [src]
     elif is_list(src):
         dst = list(src)
     else:
-        dst = [src]
+        raise ValueError("Unexpected type in norm_as_list")
     return dst
 
 
@@ -319,13 +439,13 @@ def norm_as_dict(src):
     """
     if src is None:
         dst = {}
-    elif is_dict(src):
+    elif isinstance(src, dict):
         dst = dict(src)
     elif is_list(src):
         dst = [i.split("=", 1) for i in src if i]
         dst = [(a if len(a) == 2 else (a[0], None)) for a in dst]
         dst = dict(dst)
-    elif is_str(src):
+    elif isinstance(src, str):
         key, value = src.split("=", 1) if "=" in src else (src, None)
         dst = {key: value}
     else:
@@ -334,7 +454,7 @@ def norm_as_dict(src):
 
 
 def norm_ulimit(inner_value):
-    if is_dict(inner_value):
+    if isinstance(inner_value, dict):
         if not inner_value.keys() & {"soft", "hard"}:
             raise ValueError("expected at least one soft or hard limit")
         soft = inner_value.get("soft", inner_value.get("hard", None))
@@ -410,6 +530,8 @@ async def assert_volume(compose, mount_dict):
         if is_ext:
             raise RuntimeError(f"External volume [{vol_name}] does not exists") from e
         labels = vol.get("labels", None) or []
+        if not is_list(labels) and not isinstance(labels, dict):
+            raise ValueError("labels not list or dict on volume [{vol_name}]") from e
         args = [
             "create",
             "--label",
@@ -430,7 +552,7 @@ async def assert_volume(compose, mount_dict):
         _ = (await compose.podman.output([], "volume", ["inspect", vol_name])).decode("utf-8")
 
 
-def mount_desc_to_mount_args(compose, mount_desc, srv_name, cnt_name):  # pylint: disable=unused-argument
+def mount_desc_to_mount_args(compose, mount_desc, srv_name='DEPRECATED', cnt_name='DEPRECATED'):  # pylint: disable=unused-argument
     mount_type = mount_desc.get("type", None)
     vol = mount_desc.get("_vol", None) if mount_type == "volume" else None
     source = vol["name"] if vol else mount_desc.get("source", None)
@@ -469,7 +591,7 @@ def mount_desc_to_mount_args(compose, mount_desc, srv_name, cnt_name):  # pylint
 def ulimit_to_ulimit_args(ulimit, podman_args):
     if ulimit is not None:
         # ulimit can be a single value, i.e. ulimit: host
-        if is_str(ulimit):
+        if isinstance(ulimit, str):
             podman_args.extend(["--ulimit", ulimit])
         # or a dictionary or list:
         else:
@@ -493,7 +615,7 @@ def container_to_ulimit_build_args(cnt, podman_args):
         ulimit_to_ulimit_args(build.get("ulimits", []), podman_args)
 
 
-def mount_desc_to_volume_args(compose, mount_desc, srv_name, cnt_name):  # pylint: disable=unused-argument
+def mount_desc_to_volume_args(compose, mount_desc, srv_name='DEPRECATED', cnt_name='DEPRECATED'):  # pylint: disable=unused-argument
     mount_type = mount_desc["type"]
     if mount_type not in ("bind", "volume"):
         raise ValueError("unknown mount type:" + mount_type)
@@ -536,16 +658,14 @@ def mount_desc_to_volume_args(compose, mount_desc, srv_name, cnt_name):  # pylin
 def get_mnt_dict(compose, cnt, volume):
     proj_name = compose.project_name
     srv_name = cnt["_service"]
-    basedir = compose.dirname
-    if is_str(volume):
-        volume = parse_short_mount(volume, basedir)
+    if isinstance(volume, str):
+        volume = parse_short_mount(compose, volume)
     return fix_mount_dict(compose, volume, proj_name, srv_name)
 
 
 async def get_mount_args(compose, cnt, volume):
     volume = get_mnt_dict(compose, cnt, volume)
     # proj_name = compose.project_name
-    srv_name = cnt["_service"]
     mount_type = volume["type"]
     await assert_volume(compose, volume)
     if compose.prefer_volume_over_mount:
@@ -563,9 +683,9 @@ async def get_mount_args(compose, cnt, volume):
             if opts:
                 args += ":" + ",".join(opts)
             return ["--tmpfs", args]
-        args = mount_desc_to_volume_args(compose, volume, srv_name, cnt["name"])
+        args = mount_desc_to_volume_args(compose, volume)
         return ["-v", args]
-    args = mount_desc_to_mount_args(compose, volume, srv_name, cnt["name"])
+    args = mount_desc_to_mount_args(compose, volume)
     return ["--mount", args]
 
 
@@ -574,7 +694,7 @@ def get_secret_args(compose, cnt, secret, podman_is_building=False):
     podman_is_building: True if we are preparing arguments for an invocation of "podman build"
                         False if we are preparing for something else like "podman run"
     """
-    secret_name = secret if is_str(secret) else secret.get("source", None)
+    secret_name = secret if isinstance(secret, str) else secret.get("source", None)
     if not secret_name or secret_name not in compose.declared_secrets.keys():
         raise ValueError(f'ERROR: undeclared secret: "{secret}", service: {cnt["_service"]}')
     declared_secret = compose.declared_secrets[secret_name]
@@ -583,11 +703,17 @@ def get_secret_args(compose, cnt, secret, podman_is_building=False):
     dest_file = ""
     secret_opts = ""
 
-    secret_target = None if is_str(secret) else secret.get("target", None)
-    secret_uid = None if is_str(secret) else secret.get("uid", None)
-    secret_gid = None if is_str(secret) else secret.get("gid", None)
-    secret_mode = None if is_str(secret) else secret.get("mode", None)
-    secret_type = None if is_str(secret) else secret.get("type", None)
+    secret_target = None
+    secret_uid = None
+    secret_gid = None
+    secret_mode = None
+    secret_type = None
+    if isinstance(secret, dict):
+        secret_target = secret.get("target", None)
+        secret_uid = secret.get("uid", None)
+        secret_gid = secret.get("gid", None)
+        secret_mode = secret.get("mode", None)
+        secret_type = secret.get("type", None)
 
     if source_file:
         # assemble path for source file first, because we need it for all cases
@@ -830,7 +956,7 @@ def get_network_create_args(net_desc, proj_name, net_name):
     if net_desc.get("enable_ipv6", None):
         args.append("--ipv6")
 
-    if is_dict(ipam_config_ls):
+    if isinstance(ipam_config_ls, dict):
         ipam_config_ls = [ipam_config_ls]
     for ipam_config in ipam_config_ls:
         subnet = ipam_config.get("subnet", None)
@@ -858,13 +984,13 @@ async def assert_cnt_nets(compose, cnt):
     nets = compose.networks
     default_net = compose.default_net
     cnt_nets = cnt.get("networks", None)
-    if cnt_nets and is_dict(cnt_nets):
+    if cnt_nets and isinstance(cnt_nets, dict):
         cnt_nets = list(cnt_nets.keys())
     cnt_nets = norm_as_list(cnt_nets or default_net)
     for net in cnt_nets:
         net_desc = nets[net] or {}
         is_ext = net_desc.get("external", None)
-        ext_desc = is_ext if is_dict(is_ext) else {}
+        ext_desc = is_ext if isinstance(is_ext, dict) else {}
         default_net_name = default_network_name_for_project(compose, proj_name, net, is_ext)
         net_name = ext_desc.get("name", None) or net_desc.get("name", None) or default_net_name
         try:
@@ -926,7 +1052,7 @@ def get_net_args(compose, cnt):
     ip_assignments = 0
     if cnt.get("_aliases", None):
         aliases.extend(cnt.get("_aliases", None))
-    if cnt_nets and is_dict(cnt_nets):
+    if cnt_nets and isinstance(cnt_nets, dict):
         prioritized_cnt_nets = []
         # cnt_nets is {net_key: net_value, ...}
         for net_key, net_value in cnt_nets.items():
@@ -954,7 +1080,7 @@ def get_net_args(compose, cnt):
     for net in cnt_nets:
         net_desc = nets[net] or {}
         is_ext = net_desc.get("external", None)
-        ext_desc = is_ext if is_dict(is_ext) else {}
+        ext_desc = is_ext if isinstance(is_ext, dict) else {}
         default_net_name = default_network_name_for_project(compose, proj_name, net, is_ext)
         net_name = ext_desc.get("name", None) or net_desc.get("name", None) or default_net_name
         net_names.append(net_name)
@@ -990,7 +1116,7 @@ def get_net_args(compose, cnt):
         for net_, net_config_ in multiple_nets.items():
             net_desc = nets[net_] or {}
             is_ext = net_desc.get("external", None)
-            ext_desc = is_ext if is_dict(is_ext) else {}
+            ext_desc = is_ext if isinstance(is_ext, dict) else {}
             default_net_name = default_network_name_for_project(compose, proj_name, net_, is_ext)
             net_name = ext_desc.get("name", None) or net_desc.get("name", None) or default_net_name
 
@@ -1041,7 +1167,7 @@ def get_net_args(compose, cnt):
 
 async def container_to_args(compose, cnt, detached=True):
     # TODO: double check -e , --add-host, -v, --read-only
-    dirname = compose.dirname
+    # dirname = compose.dirname
     pod = cnt.get("pod", None) or ""
     name = cnt["name"]
     podman_args = [f"--name={name}"]
@@ -1084,19 +1210,22 @@ async def container_to_args(compose, cnt, detached=True):
     for item in norm_as_list(cnt.get("dns_search", None)):
         podman_args.extend(["--dns-search", item])
     env_file = cnt.get("env_file", [])
-    if is_str(env_file) or is_dict(env_file):
+    if isinstance(env_file, (dict, str)):
         env_file = [env_file]
     for i in env_file:
-        if is_str(i):
-            i = {"path": i}
+        if isinstance(i, str):
+            i = {"path": i, "required": True}
+        elif not isinstance(i, dict):
+            raise ValueError("invalid env_file")
         path = i["path"]
         required = i.get("required", True)
-        i = os.path.realpath(os.path.join(dirname, path))
+        # i = os.path.realpath(os.path.join(dirname, path))
+        i = os.path.realpath(os.path.join(path))
         if not os.path.exists(i):
             if not required:
                 continue
             raise ValueError("Env file at {} does not exist".format(i))
-        dotenv_dict = {}
+        dotenv_dict: dict
         dotenv_dict = dotenv_to_dict(i)
         env = norm_as_list(dotenv_dict)
         for e in env:
@@ -1105,7 +1234,7 @@ async def container_to_args(compose, cnt, detached=True):
     for e in env:
         podman_args.extend(["-e", e])
     tmpfs_ls = cnt.get("tmpfs", [])
-    if is_str(tmpfs_ls):
+    if isinstance(tmpfs_ls, str):
         tmpfs_ls = [tmpfs_ls]
     for i in tmpfs_ls:
         podman_args.extend(["--tmpfs", i])
@@ -1187,7 +1316,7 @@ async def container_to_args(compose, cnt, detached=True):
         podman_args.extend(["--init-path", cnt["init-path"]])
     entrypoint = cnt.get("entrypoint", None)
     if entrypoint is not None:
-        if is_str(entrypoint):
+        if isinstance(entrypoint, str):
             entrypoint = shlex.split(entrypoint)
         podman_args.extend(["--entrypoint", json.dumps(entrypoint)])
     platform = cnt.get("platform", None)
@@ -1198,7 +1327,7 @@ async def container_to_args(compose, cnt, detached=True):
 
     # WIP: healthchecks are still work in progress
     healthcheck = cnt.get("healthcheck", None) or {}
-    if not is_dict(healthcheck):
+    if not isinstance(healthcheck, dict):
         raise ValueError("'healthcheck' must be a key-value mapping")
     healthcheck_disable = healthcheck.get("disable", False)
     healthcheck_test = healthcheck.get("test", None)
@@ -1206,7 +1335,7 @@ async def container_to_args(compose, cnt, detached=True):
         healthcheck_test = ["NONE"]
     if healthcheck_test:
         # If it's a string, it's equivalent to specifying CMD-SHELL
-        if is_str(healthcheck_test):
+        if isinstance(healthcheck_test, str):
             # podman does not add shell to handle command with whitespace
             podman_args.extend([
                 "--healthcheck-command",
@@ -1268,7 +1397,7 @@ async def container_to_args(compose, cnt, detached=True):
         podman_args.append(cnt["image"])  # command, ..etc.
     command = cnt.get("command", None)
     if command is not None:
-        if is_str(command):
+        if isinstance(command, str):
             podman_args.extend(shlex.split(command))
         else:
             podman_args.extend([str(i) for i in command])
@@ -1311,15 +1440,17 @@ def flat_deps(services, with_extends=False):
                     deps.add(ext)
                 continue
         deps_ls = srv.get("depends_on", None) or []
-        if is_str(deps_ls):
+        if isinstance(deps_ls, str):
             deps_ls = [deps_ls]
-        elif is_dict(deps_ls):
+        elif isinstance(deps_ls, dict):
             deps_ls = list(deps_ls.keys())
         deps.update(deps_ls)
         # parse link to get service name and remove alias
         links_ls = srv.get("links", None) or []
-        if not is_list(links_ls):
+        if isinstance(links_ls, str):
             links_ls = [links_ls]
+        if not is_list(links_ls):
+            raise ValueError("links must be list or string")
         deps.update([(c.split(":")[0] if ":" in c else c) for c in links_ls])
         for c in links_ls:
             if ":" in c:
@@ -1377,10 +1508,14 @@ class Podman:
             )
 
             stdout_data, stderr_data = await p.communicate()
-            if p.returncode == 0:
-                return stdout_data
 
-            raise subprocess.CalledProcessError(p.returncode, " ".join(cmd_ls), stderr_data)
+            returncode = p.returncode
+            if returncode == 0:
+                return stdout_data
+            if returncode is None:
+                returncode = -1
+
+            raise subprocess.CalledProcessError(returncode, " ".join(cmd_ls), stderr_data)
 
     def exec(
         self,
@@ -1410,7 +1545,7 @@ class Podman:
             cmd_ls = [self.podman_path, *podman_args, cmd] + xargs + cmd_args
             log.info(" ".join([str(i) for i in cmd_ls]))
             if self.dry_run:
-                return None
+                return 0
 
             if log_formatter is not None:
 
@@ -1478,7 +1613,7 @@ class Podman:
 def normalize_service(service, sub_dir=""):
     if "build" in service:
         build = service["build"]
-        if is_str(build):
+        if isinstance(build, str):
             service["build"] = {"context": build}
     if sub_dir and "build" in service:
         build = service["build"]
@@ -1493,19 +1628,20 @@ def normalize_service(service, sub_dir=""):
                 context = "."
             service["build"]["context"] = context
     if "build" in service and "additional_contexts" in service["build"]:
-        if is_dict(build["additional_contexts"]):
+        build = service["build"]
+        if isinstance(build["additional_contexts"], dict):
             new_additional_contexts = []
             for k, v in build["additional_contexts"].items():
                 new_additional_contexts.append(f"{k}={v}")
             build["additional_contexts"] = new_additional_contexts
     for key in ("command", "entrypoint"):
         if key in service:
-            if is_str(service[key]):
+            if isinstance(service[key], str):
                 service[key] = shlex.split(service[key])
     for key in ("env_file", "security_opt", "volumes"):
         if key not in service:
             continue
-        if is_str(service[key]):
+        if isinstance(service[key], str):
             service[key] = [service[key]]
     if "security_opt" in service:
         sec_ls = service["security_opt"]
@@ -1518,12 +1654,12 @@ def normalize_service(service, sub_dir=""):
         service[key] = norm_as_dict(service[key])
     if "extends" in service:
         extends = service["extends"]
-        if is_str(extends):
+        if isinstance(extends, str):
             extends = {"service": extends}
             service["extends"] = extends
     if "depends_on" in service:
         deps = service["depends_on"]
-        if is_str(deps):
+        if isinstance(deps, str):
             deps = [deps]
         if is_list(deps):
             deps_dict = {}
@@ -1546,9 +1682,9 @@ def normalize(compose):
 def normalize_service_final(service: dict, project_dir: str) -> dict:
     if "build" in service:
         build = service["build"]
-        context = build if is_str(build) else build.get("context", ".")
+        context = build if isinstance(build, str) else build.get("context", ".")
         context = os.path.normpath(os.path.join(project_dir, context))
-        if not is_dict(service["build"]):
+        if not isinstance(service["build"], dict):
             service["build"] = {}
         service["build"]["context"] = context
     return service
@@ -1562,7 +1698,7 @@ def normalize_final(compose: dict, project_dir: str) -> dict:
 
 
 def clone(value):
-    return value.copy() if is_list(value) or is_dict(value) else value
+    return value.copy() if is_list(value) or isinstance(value, dict) else value
 
 
 def rec_merge_one(target, source):
@@ -1600,7 +1736,7 @@ def rec_merge_one(target, source):
                 value.extend(value2)
             else:
                 value.extend(value2)
-        elif is_dict(value2):
+        elif isinstance(value2, dict):
             rec_merge_one(value, value2)
         else:
             target[key] = value2
@@ -1611,6 +1747,7 @@ def rec_merge(target, *sources):
     """
     update target recursively from sources
     """
+    ret = target
     for source in sources:
         ret = rec_merge_one(target, source)
     return ret
@@ -1620,7 +1757,7 @@ def resolve_extends(services, service_names, environ):
     for name in service_names:
         service = services[name]
         ext = service.get("extends", {})
-        if is_str(ext):
+        if isinstance(ext, str):
             ext = {"service": ext}
         from_service_name = ext.get("service", None)
         if not from_service_name:
@@ -1635,6 +1772,8 @@ def resolve_extends(services, service_names, environ):
                 content = content["services"]
             subdirectory = os.path.dirname(filename)
             content = rec_subs(content, environ)
+            if not isinstance(content, dict):
+                raise ValueError("services must be a dict")
             from_service = content.get(from_service_name, {}) or {}
             normalize_service(from_service, subdirectory)
         else:
@@ -1674,16 +1813,16 @@ COMPOSE_DEFAULT_LS = [
 
 class PodmanCompose:
     def __init__(self):
-        self.podman = None
+        self.podman: Podman
         self.podman_version = None
         self.environ = {}
         self.exit_code = None
         self.commands = {}
-        self.global_args = None
+        self.global_args = argparse.Namespace()
         self.project_name = None
         self.dirname = None
         self.pods = None
-        self.containers = None
+        self.containers = []
         self.vols = None
         self.networks = {}
         self.default_net = "default"
@@ -1705,8 +1844,10 @@ class PodmanCompose:
         ]
 
     def assert_services(self, services):
-        if is_str(services):
+        if isinstance(services, str):
             services = [services]
+        if not is_list(services):
+            raise ValueError("services must be list or string")
         given = set(services or [])
         missing = given - self.all_services
         if missing:
@@ -1716,8 +1857,9 @@ class PodmanCompose:
 
     def get_podman_args(self, cmd):
         xargs = []
-        for args in self.global_args.podman_args:
-            xargs.extend(shlex.split(args))
+        if self.global_args:
+            for args in self.global_args.podman_args:
+                xargs.extend(shlex.split(args))
         cmd_norm = cmd if cmd != "create" else "run"
         cmd_args = self.global_args.__dict__.get(f"podman_{cmd_norm}_args", None) or []
         for args in cmd_args:
@@ -1782,29 +1924,37 @@ class PodmanCompose:
             else:
                 default_ls = COMPOSE_DEFAULT_LS
             args.file = list(filter(os.path.exists, default_ls))
-        files = args.file
+        files = [
+            {
+                'path': filename,
+                'project_directory': os.path.realpath(os.path.dirname(filename)),
+                #'env_file': [args.env_file] if isinstance(args.env_file, str) else args.env_file if
+                # args.env_file else [],
+                'env_file': [],
+            }
+            for filename in args.file
+        ]
         if not files:
             log.fatal(
                 "no compose.yaml, docker-compose.yml or container-compose.yml file found, "
                 "pass files with -f"
             )
             sys.exit(-1)
-        ex = map(lambda x: x == '-' or os.path.exists(x), files)
+        ex = map(lambda x: x == '-' or os.path.exists(x), [f['path'] for f in files])
         missing = [fn0 for ex0, fn0 in zip(ex, files) if not ex0]
         if missing:
             log.fatal("missing files: %s", missing)
             sys.exit(1)
         # make absolute
         relative_files = files
-        filename = files[0]
+        file = files[0]
         project_name = args.project_name
         # no_ansi = args.no_ansi
         # no_cleanup = args.no_cleanup
         # dry_run = args.dry_run
         # host_env = None
-        dirname = os.path.realpath(os.path.dirname(filename))
-        dir_basename = os.path.basename(dirname)
-        self.dirname = dirname
+        dir_basename = os.path.basename(file['project_directory'])
+        self.dirname = file['project_directory']
 
         # env-file is relative to the CWD
         dotenv_dict = {}
@@ -1812,14 +1962,14 @@ class PodmanCompose:
             # Load .env from the Compose file's directory to preserve
             # behavior prior to 1.1.0 and to match with Docker Compose (v2).
             if ".env" == args.env_file:
-                project_dotenv_file = os.path.realpath(os.path.join(dirname, ".env"))
+                project_dotenv_file = os.path.realpath(os.path.join(self.dirname, ".env"))
                 if os.path.exists(project_dotenv_file):
                     dotenv_dict.update(dotenv_to_dict(project_dotenv_file))
             dotenv_path = os.path.realpath(args.env_file)
             dotenv_dict.update(dotenv_to_dict(dotenv_path))
 
         # TODO: remove next line
-        os.chdir(dirname)
+        os.chdir(self.dirname)
 
         os.environ.update({
             key: value for key, value in dotenv_dict.items() if key.startswith("PODMAN_")
@@ -1829,12 +1979,12 @@ class PodmanCompose:
         # see: https://docs.docker.com/compose/reference/envvars/
         # see: https://docs.docker.com/compose/env-file/
         self.environ.update({
-            "COMPOSE_PROJECT_DIR": dirname,
-            "COMPOSE_FILE": pathsep.join(relative_files),
+            "COMPOSE_PROJECT_DIR": self.dirname,
+            "COMPOSE_FILE": pathsep.join([f['path'] for f in relative_files]),
             "COMPOSE_PATH_SEPARATOR": pathsep,
         })
 
-        if args and 'env' in args and args.env:
+        if 'env' in args and args.env:
             env_vars = norm_as_dict(args.env)
             self.environ.update(env_vars)
 
@@ -1844,29 +1994,101 @@ class PodmanCompose:
 
         while True:
             try:
-                filename = next(files_iter)
+                file = next(files_iter)
             except StopIteration:
                 break
 
-            if filename.strip().split('/')[-1] == '-':
+            if file['path'].strip().split('/')[-1] == '-':
                 content = yaml.safe_load(sys.stdin)
             else:
-                with open(filename, "r", encoding="utf-8") as f:
+                with open(file['path'], "r", encoding="utf-8") as f:
                     content = yaml.safe_load(f)
                 # log(filename, json.dumps(content, indent = 2))
             if not isinstance(content, dict):
                 sys.stderr.write(
-                    "Compose file does not contain a top level object: %s\n" % filename
+                    "Compose file does not contain a top level object: %s\n" % file['path']
                 )
                 sys.exit(1)
             content = normalize(content)
+
+            def translate_paths_service(content: dict, project_directory: str):
+                if 'env_file' in content:
+                    env_file = (
+                        [content['env_file']]
+                        if isinstance(content['env_file'], str)
+                        else content['env_file']
+                    )
+                    content['env_file'] = [
+                        {
+                            'path': os.path.join(
+                                project_directory or os.path.dirname(file['path']),
+                                ef if isinstance(ef, str) else ef['path'],
+                            ),
+                            'required': ef.get('required', True) if isinstance(ef, dict) else True,
+                        }
+                        for ef in env_file
+                    ]
+                return content
+
+            def translate_paths(content, project_directory):
+                if 'services' in content:
+                    services = {
+                        key: translate_paths_service(val, project_directory)
+                        for key, val in content['services'].items()
+                    }
+                    content['services'] = services
+                return content
+
+            content = translate_paths(
+                content, file['project_directory'] or os.path.dirname(file['path'])
+            )
             # log(filename, json.dumps(content, indent = 2))
             content = rec_subs(content, self.environ)
             rec_merge(compose, content)
             # If `include` is used, append included files to files
-            include = compose.get("include", None)
-            if include:
-                files.extend(include)
+            spec_include = compose.get("include", None)
+            #####
+            # def flatten(S):
+            #    # https://stackoverflow.com/questions/12472338/flattening-a-list-recursively
+            #    if len(S) == 0:
+            #        return S
+            #    if isinstance(S[0], list):
+            #        return flatten(S[0]) + flatten(S[1:])
+            #    print(len(S), S)
+            #    return S[:1] + flatten(S[1:])
+
+            def extend_include(project_directory: str, include_spec: list) -> list[dict[str, dict]]:
+                # https://github.com/compose-spec/compose-spec/blob/main/14-include.md
+                if not is_list(include_spec):
+                    raise ValueError("include must be list")
+                # mount_src = os.path.realpath(os.path.join(basedir, os.path.expanduser(mount_src)))
+                include = [
+                    {
+                        'path': os.path.join(project_directory, f),
+                        'project_directory': None,
+                        'env_file': [],
+                    }
+                    if isinstance(f, str)
+                    else {
+                        'path': os.path.join(project_directory, f['path']),
+                        'project_directory': os.path.join(project_directory, f['project_directory'])
+                        if f.get('project_directory', None)
+                        else None,
+                        'env_file': [os.path.join(project_directory, f['env_file'])]
+                        if isinstance(f.get('env_file', None), str)
+                        else os.path.join(project_directory, f.get('env_file'))
+                        if f.get('env_file', None)
+                        else None,
+                    }
+                    for f in include_spec
+                ]
+                return include
+
+            #####
+            if spec_include:
+                include_files = extend_include(file['project_directory'] or '.', spec_include)
+
+                files.extend(include_files)
                 # As compose obj is updated and tested with every loop, not deleting `include`
                 # from it, results in it being tested again and again, original values for
                 # `include` be appended to `files`, and, included files be processed for ever.
@@ -1930,7 +2152,9 @@ class PodmanCompose:
         allnets = set()
         for name, srv in services.items():
             srv_nets = srv.get("networks", None) or default_net
-            srv_nets = list(srv_nets.keys()) if is_dict(srv_nets) else norm_as_list(srv_nets)
+            srv_nets = (
+                list(srv_nets.keys()) if isinstance(srv_nets, dict) else norm_as_list(srv_nets)
+            )
             allnets.update(srv_nets)
         given_nets = set(nets.keys())
         missing_nets = allnets - given_nets
@@ -1949,8 +2173,9 @@ class PodmanCompose:
             "io.podman.compose.version=" + __version__,
             f"PODMAN_SYSTEMD_UNIT=podman-compose@{project_name}.service",
             "com.docker.compose.project=" + project_name,
-            "com.docker.compose.project.working_dir=" + dirname,
-            "com.docker.compose.project.config_files=" + ",".join(relative_files),
+            "com.docker.compose.project.working_dir=" + self.dirname,
+            "com.docker.compose.project.config_files="
+            + ",".join([file['path'] for file in relative_files]),
         ]
         # other top-levels:
         # networks: {driver: ...}
@@ -1960,7 +2185,9 @@ class PodmanCompose:
         container_names_by_service = {}
         self.services = services
         for service_name, service_desc in services.items():
-            replicas = try_int(service_desc.get("deploy", {}).get("replicas", "1"))
+            spec_replicas = try_int(service_desc.get("deploy", {}).get("replicas", "1"))
+            replicas = spec_replicas if spec_replicas is not None else 1
+
             container_names_by_service[service_name] = []
             for num in range(1, replicas + 1):
                 name0 = f"{project_name}_{service_name}_{num}"
@@ -2602,12 +2829,11 @@ async def compose_up(compose: PodmanCompose, args):
 
 def get_volume_names(compose, cnt):
     proj_name = compose.project_name
-    basedir = compose.dirname
     srv_name = cnt["_service"]
     ls = []
     for volume in cnt.get("volumes", []):
-        if is_str(volume):
-            volume = parse_short_mount(volume, basedir)
+        if isinstance(volume, str):
+            volume = parse_short_mount(compose, volume)
         volume = fix_mount_dict(compose, volume, proj_name, srv_name)
         mount_type = volume["type"]
         if mount_type != "volume":
@@ -2777,6 +3003,8 @@ def compose_run_update_container_from_args(compose, cnt, args):
     if args.volume:
         # TODO: handle volumes
         volumes = clone(cnt.get("volumes", None) or [])
+        if not is_list(volumes):
+            raise ValueError('only list definitions for volumes supported')
         volumes.extend(args.volume)
         cnt["volumes"] = volumes
     cnt["tty"] = not args.T
